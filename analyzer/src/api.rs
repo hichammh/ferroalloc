@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::aggregator::Aggregator;
 use crate::dwarf::Resolver;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 /// Minimal HTTP/1.1 server exposing the aggregated data to the VS Code extension.
 /// Endpoints:
@@ -10,7 +10,9 @@ use crate::dwarf::Resolver;
 ///   GET /leaks     — allocations still live (not yet freed)
 ///   GET /health    — liveness probe
 pub async fn serve(port: u16, aggregator: Arc<Aggregator>, _resolver: Arc<Resolver>) {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
 
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();

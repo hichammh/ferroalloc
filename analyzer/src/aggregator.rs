@@ -1,7 +1,7 @@
+use crate::dwarf::Resolver;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use serde::{Deserialize, Serialize};
-use crate::dwarf::Resolver;
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct LineStats {
@@ -27,12 +27,14 @@ pub struct Aggregator {
 
 impl Aggregator {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(Inner::default()) }
+        Self {
+            inner: Mutex::new(Inner::default()),
+        }
     }
 
     pub fn process(&self, event: &serde_json::Value, resolver: &Resolver) {
         let kind = event["kind"].as_str().unwrap_or("");
-        let ptr  = event["ptr"].as_u64().unwrap_or(0);
+        let ptr = event["ptr"].as_u64().unwrap_or(0);
         let size = event["size"].as_u64().unwrap_or(0) as usize;
         let frames: Vec<u64> = event["frames"]
             .as_array()
@@ -63,7 +65,7 @@ impl Aggregator {
                 });
                 entry.alloc_count += 1;
                 entry.total_bytes += size as u64;
-                entry.live_bytes  += size as i64;
+                entry.live_bytes += size as i64;
 
                 g.live.insert(ptr, (file, line, size));
             }
@@ -82,12 +84,20 @@ impl Aggregator {
 
     /// Returns a snapshot of all per-line statistics.
     pub fn snapshot(&self) -> Vec<LineStats> {
-        self.inner.lock().unwrap().by_line.values().cloned().collect()
+        self.inner
+            .lock()
+            .unwrap()
+            .by_line
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Returns all allocations that have not been freed yet (potential leaks).
     pub fn live_leaks(&self) -> Vec<(u64, String, u32, usize)> {
-        self.inner.lock().unwrap()
+        self.inner
+            .lock()
+            .unwrap()
             .live
             .iter()
             .map(|(&ptr, (f, l, s))| (ptr, f.clone(), *l, *s))
