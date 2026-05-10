@@ -1,0 +1,61 @@
+{
+  "name": "ferroalloc",
+  "displayName": "Ferroalloc — Rust Memory Lens",
+  "description": "Real-time heap memory visualization for Rust via CodeLens, heatmaps, and leak detection",
+  "version": "0.1.0",
+  "publisher": "hichammh",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Debuggers", "Other"],
+  "keywords": ["rust", "memory", "heap", "allocator", "profiling", "codelens"],
+  "activationEvents": [
+    "onLanguage:rust",
+    "onDebugSession"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ferroalloc.start",
+        "title": "Ferroalloc: Start Memory Tracking"
+      },
+      {
+        "command": "ferroalloc.stop",
+        "title": "Ferroalloc: Stop Memory Tracking"
+      },
+      {
+        "command": "ferroalloc.showLeaks",
+        "title": "Ferroalloc: Show Live Leaks"
+      }
+    ],
+    "configuration": {
+      "title": "Ferroalloc",
+      "properties": {
+        "ferroalloc.analyzerPort": {
+          "type": "number",
+          "default": 7778,
+          "description": "TCP port the ferroalloc-analyzer API listens on"
+        },
+        "ferroalloc.refreshIntervalMs": {
+          "type": "number",
+          "default": 1000,
+          "description": "How often (in ms) the extension polls the analyzer for updated stats"
+        },
+        "ferroalloc.heatmapEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight lines by allocation volume using a green-to-red heatmap"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}
