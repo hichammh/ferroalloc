@@ -1,22 +1,22 @@
-mod dwarf;
 mod aggregator;
 mod api;
+mod dwarf;
 
-use tokio::net::TcpListener;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
 
 const PROBE_PORT: u16 = 7777;
 const API_PORT: u16 = 7778;
 
 #[tokio::main]
 async fn main() {
-    let binary_path = std::env::args().nth(1)
+    let binary_path = std::env::args()
+        .nth(1)
         .expect("Usage: ferroalloc-analyzer <path-to-debug-binary>");
 
-    let resolver = Arc::new(
-        dwarf::Resolver::new(&binary_path).expect("Failed to load DWARF debug info")
-    );
+    let resolver =
+        Arc::new(dwarf::Resolver::new(&binary_path).expect("Failed to load DWARF debug info"));
 
     let aggregator = Arc::new(aggregator::Aggregator::new());
 

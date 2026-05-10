@@ -1,5 +1,5 @@
-use std::path::Path;
 use addr2line::{Context, Location};
+use std::path::Path;
 
 pub struct Resolver {
     ctx: Context<gimli::EndianRcSlice<gimli::RunTimeEndian>>,
@@ -21,7 +21,8 @@ impl Resolver {
         let frame = frames.next().ok()??;
 
         let loc: Option<Location> = frame.location;
-        let func = frame.function
+        let func = frame
+            .function
             .and_then(|f| f.demangle().ok().map(|s| s.into_owned()));
 
         Some(SourceLocation {

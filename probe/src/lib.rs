@@ -1,8 +1,8 @@
+use backtrace::Backtrace;
+use crossbeam_queue::SegQueue;
+use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use crossbeam_queue::SegQueue;
-use backtrace::Backtrace;
-use serde::Serialize;
 
 // Thread-local guard preventing re-entrant allocations triggered by the probe itself.
 // Backtrace collection internally allocates, so without this we'd recurse infinitely.
@@ -13,10 +13,10 @@ thread_local! {
 
 #[derive(Serialize, Debug)]
 pub struct AllocEvent {
-    pub kind: &'static str,  // "alloc" | "dealloc"
+    pub kind: &'static str, // "alloc" | "dealloc"
     pub ptr: u64,
     pub size: usize,
-    pub frames: Vec<u64>,    // raw instruction pointers, resolved by the analyzer
+    pub frames: Vec<u64>, // raw instruction pointers, resolved by the analyzer
 }
 
 // Lock-free global queue drained by the background flush thread
@@ -74,19 +74,26 @@ unsafe impl GlobalAlloc for FerroAllocator {
 
 fn record(ptr: u64, size: usize, kind: &'static str) {
     let already_in = IN_PROBE.with(|g| {
-        if g.get() { true } else { g.set(true); false }
+        if g.get() {
+            true
+        } else {
+            g.set(true);
+            false
+        }
     });
-    if already_in { return; }
+    if already_in {
+        return;
+    }
 
     let bt = Backtrace::new_unresolved();
-    let frames: Vec<u64> = bt
-        .frames()
-        .iter()
-        .map(|f| f.ip() as u64)
-        .take(32)
-        .collect();
+    let frames: Vec<u64> = bt.frames().iter().map(|f| f.ip() as u64).take(32).collect();
 
-    EVENT_QUEUE.push(AllocEvent { kind, ptr, size, frames });
+    EVENT_QUEUE.push(AllocEvent {
+        kind,
+        ptr,
+        size,
+        frames,
+    });
 
     IN_PROBE.with(|g| g.set(false));
 }
@@ -150,7 +157,9 @@ mod tests {
             assert!(!ptr.is_null());
 
             let events = drain_queue();
-            assert!(events.iter().any(|e| e.kind == "alloc" && e.size == 64 && e.ptr == ptr as u64));
+            assert!(events
+                .iter()
+                .any(|e| e.kind == "alloc" && e.size == 64 && e.ptr == ptr as u64));
 
             FerroAllocator.dealloc(ptr, layout);
         }
@@ -168,7 +177,9 @@ mod tests {
             FerroAllocator.dealloc(ptr, layout);
 
             let events = drain_queue();
-            assert!(events.iter().any(|e| e.kind == "dealloc" && e.ptr == ptr as u64));
+            assert!(events
+                .iter()
+                .any(|e| e.kind == "dealloc" && e.ptr == ptr as u64));
         }
     }
 
@@ -185,8 +196,10 @@ mod tests {
             assert!(!new_ptr.is_null());
 
             let events = drain_queue();
-            assert!(events.iter().any(|e| e.kind == "dealloc" && e.ptr == ptr as u64));
-            assert!(events.iter().any(|e| e.kind == "alloc"   && e.size == 256));
+            assert!(events
+                .iter()
+                .any(|e| e.kind == "dealloc" && e.ptr == ptr as u64));
+            assert!(events.iter().any(|e| e.kind == "alloc" && e.size == 256));
 
             FerroAllocator.dealloc(new_ptr, Layout::from_size_align(256, 8).unwrap());
         }
@@ -201,7 +214,10 @@ mod tests {
             let ptr = FerroAllocator.alloc(layout);
             let events = drain_queue();
             let event = events.iter().find(|e| e.kind == "alloc").unwrap();
-            assert!(!event.frames.is_empty(), "backtrace frames should be captured");
+            assert!(
+                !event.frames.is_empty(),
+                "backtrace frames should be captured"
+            );
             FerroAllocator.dealloc(ptr, layout);
         }
     }

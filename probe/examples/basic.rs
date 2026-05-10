@@ -1,4 +1,4 @@
-use ferroalloc_probe::{FerroAllocator, start_flush_thread};
+use ferroalloc_probe::{start_flush_thread, FerroAllocator};
 
 #[global_allocator]
 static ALLOC: FerroAllocator = FerroAllocator;
