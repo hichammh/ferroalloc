@@ -15,8 +15,10 @@ async fn main() {
         .nth(1)
         .expect("Usage: ferroalloc-analyzer <path-to-debug-binary>");
 
-    let resolver =
-        Arc::new(dwarf::Resolver::new(&binary_path).expect("Failed to load DWARF debug info"));
+    let resolver = Arc::new(
+        dwarf::Resolver::new(&binary_path)
+            .unwrap_or_else(|e| panic!("Failed to load DWARF debug info: {e}")),
+    );
 
     let aggregator = Arc::new(aggregator::Aggregator::new());
 

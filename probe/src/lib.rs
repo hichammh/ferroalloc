@@ -8,7 +8,7 @@ use std::cell::Cell;
 // Backtrace collection internally allocates, so without this we'd recurse infinitely.
 // A Cell<bool> is sufficient — no cross-thread synchronisation needed by design.
 thread_local! {
-    static IN_PROBE: Cell<bool> = Cell::new(false);
+    static IN_PROBE: Cell<bool> = const { Cell::new(false) };
 }
 
 #[derive(Serialize, Debug)]

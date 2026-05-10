@@ -1,5 +1,5 @@
 use crate::dwarf::Resolver;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
