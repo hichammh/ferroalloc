@@ -1,47 +1,52 @@
 use crate::aggregator::Aggregator;
-use crate::dwarf::Resolver;
+use std::io::Cursor;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tiny_http::{Header, Method, Response, Server};
 
-/// Minimal HTTP/1.1 server exposing the aggregated data to the VS Code extension.
+/// Blocking HTTP API server — run this on a dedicated thread (not inside tokio).
+///
 /// Endpoints:
-///   GET /snapshot  — per-line allocation stats
-///   GET /leaks     — allocations still live (not yet freed)
-///   GET /health    — liveness probe
-pub async fn serve(port: u16, aggregator: Arc<Aggregator>, _resolver: Arc<Resolver>) {
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .unwrap();
+///   GET  /snapshot  — per-line allocation stats, sorted by total bytes desc
+///   GET  /leaks     — allocations still live (not yet freed)
+///   POST /reset     — clear all accumulated data
+///   GET  /health    — liveness probe
+pub fn serve(port: u16, aggregator: Arc<Aggregator>) {
+    let server = Server::http(format!("127.0.0.1:{port}"))
+        .unwrap_or_else(|e| panic!("Cannot bind API port {port}: {e}"));
 
-    loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let agg = Arc::clone(&aggregator);
+    eprintln!("[ferroalloc] API listening on http://127.0.0.1:{port}");
 
-        tokio::spawn(async move {
-            let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf).await;
-            let request = String::from_utf8_lossy(&buf);
+    for request in server.incoming_requests() {
+        let (status, body) = match (request.method(), request.url()) {
+            (Method::Get, "/snapshot") => {
+                let json = serde_json::to_string(&aggregator.snapshot()).unwrap_or_default();
+                (200, json)
+            }
+            (Method::Get, "/leaks") => {
+                let json = serde_json::to_string(&aggregator.live_leaks()).unwrap_or_default();
+                (200, json)
+            }
+            (Method::Post, "/reset") => {
+                aggregator.reset();
+                (200, r#"{"status":"reset"}"#.to_string())
+            }
+            (Method::Get, "/health") => (200, r#"{"status":"ok"}"#.to_string()),
+            _ => (404, r#"{"error":"not found"}"#.to_string()),
+        };
 
-            let (status, body) = if request.starts_with("GET /snapshot") {
-                let json = serde_json::to_string(&agg.snapshot()).unwrap_or_default();
-                ("200 OK", json)
-            } else if request.starts_with("GET /leaks") {
-                let leaks: Vec<_> = agg.live_leaks().into_iter().map(|(ptr, f, l, s)| {
-                    serde_json::json!({ "ptr": ptr, "file": f, "line": l, "size": s })
-                }).collect();
-                ("200 OK", serde_json::to_string(&leaks).unwrap_or_default())
-            } else if request.starts_with("GET /health") {
-                ("200 OK", r#"{"status":"ok"}"#.to_string())
-            } else {
-                ("404 Not Found", r#"{"error":"not found"}"#.to_string())
-            };
+        let len = body.len();
+        let response = Response::new(
+            tiny_http::StatusCode(status),
+            vec![
+                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap(),
+                Header::from_bytes("Content-Length", len.to_string().as_str()).unwrap(),
+            ],
+            Cursor::new(body),
+            Some(len),
+            None,
+        );
 
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = socket.write_all(response.as_bytes()).await;
-        });
+        let _ = request.respond(response);
     }
 }

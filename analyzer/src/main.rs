@@ -22,18 +22,16 @@ async fn main() {
 
     let aggregator = Arc::new(aggregator::Aggregator::new());
 
-    // Spawn the HTTP API server consumed by the VS Code extension
+    // Spawn the HTTP API server on a dedicated blocking thread (tiny_http is synchronous)
     let agg_api = Arc::clone(&aggregator);
-    let res_api = Arc::clone(&resolver);
-    tokio::spawn(async move {
-        api::serve(API_PORT, agg_api, res_api).await;
-    });
+    std::thread::spawn(move || api::serve(API_PORT, agg_api));
 
+    // Listen for probe events over TCP
     let listener = TcpListener::bind(format!("127.0.0.1:{PROBE_PORT}"))
         .await
-        .expect("Cannot bind probe port");
+        .unwrap_or_else(|e| panic!("Cannot bind probe port {PROBE_PORT}: {e}"));
 
-    eprintln!("[ferroalloc] Probe listener on :{PROBE_PORT} | API on :{API_PORT}");
+    eprintln!("[ferroalloc] Probe listener on 127.0.0.1:{PROBE_PORT}");
 
     loop {
         let (socket, _) = listener.accept().await.unwrap();
