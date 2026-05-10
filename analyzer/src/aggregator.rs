@@ -87,7 +87,7 @@ impl Aggregator {
             .values()
             .cloned()
             .collect();
-        stats.sort_unstable_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+        stats.sort_unstable_by_key(|s| std::cmp::Reverse(s.total_bytes));
         stats
     }
 
