@@ -1,6 +1,8 @@
 mod aggregator;
 mod api;
+mod diff;
 mod dwarf;
+mod leak_report;
 
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};

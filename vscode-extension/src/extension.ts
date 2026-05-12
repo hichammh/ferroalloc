@@ -49,6 +49,29 @@ export function activate(context: vscode.ExtensionContext): void {
             vscode.window.showInformationMessage('Ferroalloc: data reset');
         }),
 
+        vscode.commands.registerCommand('ferroalloc.saveBaseline', async () => {
+            await client.saveBaseline();
+            vscode.window.showInformationMessage('Ferroalloc: baseline snapshot saved');
+        }),
+
+        vscode.commands.registerCommand('ferroalloc.showDiff', async () => {
+            let diff;
+            try {
+                diff = await client.fetchDiff();
+            } catch {
+                vscode.window.showErrorMessage('Ferroalloc: no baseline set — run "Save Baseline" first');
+                return;
+            }
+            const sign = diff.total_delta_bytes >= 0 ? '+' : '';
+            const items = [
+                `Total delta: ${sign}${formatBytes(diff.total_delta_bytes)}`,
+                ...diff.increased.map(e => `⬆ ${e.file}:${e.line}  +${formatBytes(e.delta_total_bytes)}`),
+                ...diff.new_lines.map(e => `🆕 ${e.file}:${e.line}  +${formatBytes(e.delta_total_bytes)}`),
+                ...diff.decreased.map(e => `⬇ ${e.file}:${e.line}  ${formatBytes(e.delta_total_bytes)}`),
+            ];
+            vscode.window.showQuickPick(items, { title: 'Memory diff since baseline' });
+        }),
+
         vscode.commands.registerCommand('ferroalloc.showLeaks', async () => {
             const leaks = await client.fetchLeaks();
             if (leaks.length === 0) {

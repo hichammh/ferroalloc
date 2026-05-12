@@ -18,7 +18,9 @@
       { "command": "ferroalloc.stop",      "title": "Ferroalloc: Stop Memory Tracking" },
       { "command": "ferroalloc.toggle",    "title": "Ferroalloc: Toggle Memory Tracking" },
       { "command": "ferroalloc.reset",     "title": "Ferroalloc: Reset Collected Data" },
-      { "command": "ferroalloc.showLeaks", "title": "Ferroalloc: Show Live Leaks" }
+      { "command": "ferroalloc.showLeaks",    "title": "Ferroalloc: Show Live Leaks" },
+      { "command": "ferroalloc.saveBaseline", "title": "Ferroalloc: Save Memory Baseline" },
+      { "command": "ferroalloc.showDiff",     "title": "Ferroalloc: Show Diff Since Baseline" }
     ],
     "configuration": {
       "title": "Ferroalloc",

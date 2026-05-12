@@ -3,12 +3,24 @@ use crossbeam_queue::SegQueue;
 use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Thread-local guard preventing re-entrant allocations triggered by the probe itself.
 // Backtrace collection internally allocates, so without this we'd recurse infinitely.
 // A Cell<bool> is sufficient — no cross-thread synchronisation needed by design.
 thread_local! {
     static IN_PROBE: Cell<bool> = const { Cell::new(false) };
+}
+
+// Sampling: record only 1 out of every N allocations.
+// N=1 means record all (default). Set via `set_sample_rate()`.
+static SAMPLE_RATE: AtomicU32 = AtomicU32::new(1);
+static ALLOC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Set the sampling rate. Only 1 in every `n` allocations will be recorded.
+/// Use `n = 1` to record all (default). Higher values reduce overhead on hot paths.
+pub fn set_sample_rate(n: u32) {
+    SAMPLE_RATE.store(n.max(1), Ordering::Relaxed);
 }
 
 #[derive(Serialize, Debug)]
@@ -83,6 +95,16 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
     });
     if already_in {
         return;
+    }
+
+    // Apply sampling: skip this event if the counter is not a multiple of SAMPLE_RATE
+    let rate = SAMPLE_RATE.load(Ordering::Relaxed);
+    if rate > 1 {
+        let count = ALLOC_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if count % rate as u64 != 0 {
+            IN_PROBE.with(|g| g.set(false));
+            return;
+        }
     }
 
     let bt = Backtrace::new_unresolved();

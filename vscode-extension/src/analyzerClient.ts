@@ -17,18 +17,50 @@ export interface LeakEntry {
     size: number;
 }
 
+export interface LeakGroup {
+    function: string;
+    file: string;
+    leak_count: number;
+    leaked_bytes: number;
+    entries: LeakEntry[];
+}
+
+export interface LeakReport {
+    total_leaked_bytes: number;
+    total_leak_count: number;
+    groups: LeakGroup[];
+}
+
+export interface DiffEntry {
+    file: string;
+    line: number;
+    function: string;
+    delta_alloc_count: number;
+    delta_total_bytes: number;
+    delta_live_bytes: number;
+}
+
+export interface SnapshotDiff {
+    increased: DiffEntry[];
+    decreased: DiffEntry[];
+    new_lines: DiffEntry[];
+    total_delta_bytes: number;
+}
+
 /**
  * HTTP client for the ferroalloc-analyzer API.
  * Emits 'update' whenever the snapshot is refreshed successfully.
- * Emits 'error' when the analyzer is unreachable.
+ * Emits 'connected' / 'disconnected' on state changes.
  */
 export class AnalyzerClient extends EventEmitter {
     private baseUrl: string;
+    private port: number;
     private cache: LineStats[] = [];
     private _connected = false;
 
     constructor(port: number) {
         super();
+        this.port = port;
         this.baseUrl = `http://127.0.0.1:${port}`;
     }
 
@@ -78,6 +110,20 @@ export class AnalyzerClient extends EventEmitter {
         return this.get<LeakEntry[]>('/leaks');
     }
 
+    async fetchLeakReport(minBytes = 0): Promise<LeakReport> {
+        return this.get<LeakReport>(`/leak-report?min_bytes=${minBytes}`);
+    }
+
+    /** Save the current snapshot as baseline for diff comparison. */
+    async saveBaseline(): Promise<void> {
+        await this.post('/baseline');
+    }
+
+    /** Get diff between saved baseline and current snapshot. */
+    async fetchDiff(): Promise<SnapshotDiff> {
+        return this.get<SnapshotDiff>('/diff');
+    }
+
     async reset(): Promise<void> {
         await this.post('/reset');
         this.cache = [];
@@ -111,7 +157,13 @@ export class AnalyzerClient extends EventEmitter {
     private post(path: string): Promise<void> {
         return new Promise((resolve, reject) => {
             const req = http.request(
-                { hostname: '127.0.0.1', port: parseInt(this.baseUrl.split(':')[2]), path, method: 'POST', timeout: 2000 },
+                {
+                    hostname: '127.0.0.1',
+                    port: this.port,
+                    path,
+                    method: 'POST',
+                    timeout: 2000,
+                },
                 res => { res.resume(); res.on('end', resolve); }
             );
             req.on('error', reject);
