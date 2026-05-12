@@ -101,7 +101,7 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
     let rate = SAMPLE_RATE.load(Ordering::Relaxed);
     if rate > 1 {
         let count = ALLOC_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if count % rate as u64 != 0 {
+        if !count.is_multiple_of(rate as u64) {
             IN_PROBE.with(|g| g.set(false));
             return;
         }
