@@ -138,6 +138,11 @@ fn flush_loop(port: u16) {
 mod tests {
     use super::*;
     use std::alloc::Layout;
+    use std::sync::Mutex;
+
+    // Tests share a global EVENT_QUEUE, so they must run serially to avoid
+    // one test consuming events that belong to another.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn drain_queue() -> Vec<AllocEvent> {
         let mut events = Vec::new();
@@ -149,7 +154,8 @@ mod tests {
 
     #[test]
     fn alloc_pushes_event_to_queue() {
-        drain_queue(); // clear any prior state
+        let _guard = TEST_LOCK.lock().unwrap();
+        drain_queue();
 
         let layout = Layout::from_size_align(64, 8).unwrap();
         unsafe {
@@ -167,6 +173,7 @@ mod tests {
 
     #[test]
     fn dealloc_pushes_event_to_queue() {
+        let _guard = TEST_LOCK.lock().unwrap();
         drain_queue();
 
         let layout = Layout::from_size_align(128, 8).unwrap();
@@ -185,6 +192,7 @@ mod tests {
 
     #[test]
     fn realloc_emits_dealloc_then_alloc() {
+        let _guard = TEST_LOCK.lock().unwrap();
         drain_queue();
 
         let layout = Layout::from_size_align(64, 8).unwrap();
@@ -207,6 +215,7 @@ mod tests {
 
     #[test]
     fn frames_are_captured() {
+        let _guard = TEST_LOCK.lock().unwrap();
         drain_queue();
 
         let layout = Layout::from_size_align(32, 8).unwrap();
