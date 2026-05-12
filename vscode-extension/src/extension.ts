@@ -1,21 +1,24 @@
 import * as vscode from 'vscode';
-import { MemoryCodeLensProvider } from './codelens';
-import { HeatmapDecorator } from './heatmap';
 import { AnalyzerClient } from './analyzerClient';
+import { MemoryCodeLensProvider, formatBytes } from './codelens';
+import { HeatmapDecorator } from './heatmap';
+import { StatusBar } from './statusBar';
 
 let poller: NodeJS.Timeout | undefined;
 let client: AnalyzerClient;
-let codelens: MemoryCodeLensProvider;
 let heatmap: HeatmapDecorator;
+let statusBar: StatusBar;
+let tracking = false;
 
-export function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext): void {
     const config = vscode.workspace.getConfiguration('ferroalloc');
     const port: number = config.get('analyzerPort', 7778);
     const interval: number = config.get('refreshIntervalMs', 1000);
 
     client   = new AnalyzerClient(port);
-    codelens = new MemoryCodeLensProvider(client);
     heatmap  = new HeatmapDecorator(client);
+    statusBar = new StatusBar(client);
+    const codelens = new MemoryCodeLensProvider(client);
 
     context.subscriptions.push(
         vscode.languages.registerCodeLensProvider({ language: 'rust' }, codelens),
@@ -27,45 +30,72 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('ferroalloc.stop', () => {
             stopPolling();
+            heatmap.clearAll();
             vscode.window.showInformationMessage('Ferroalloc: memory tracking stopped');
+        }),
+
+        vscode.commands.registerCommand('ferroalloc.toggle', () => {
+            if (tracking) {
+                vscode.commands.executeCommand('ferroalloc.stop');
+            } else {
+                vscode.commands.executeCommand('ferroalloc.start');
+            }
+        }),
+
+        vscode.commands.registerCommand('ferroalloc.reset', async () => {
+            await client.reset();
+            heatmap.clearAll();
+            codelens.refresh();
+            vscode.window.showInformationMessage('Ferroalloc: data reset');
         }),
 
         vscode.commands.registerCommand('ferroalloc.showLeaks', async () => {
             const leaks = await client.fetchLeaks();
             if (leaks.length === 0) {
-                vscode.window.showInformationMessage('No live leaks detected.');
+                vscode.window.showInformationMessage('Ferroalloc: no live leaks detected.');
                 return;
             }
-            const items = leaks.map(l =>
-                `${l.file}:${l.line}  —  ${formatBytes(l.size)}`
-            );
-            vscode.window.showQuickPick(items, { title: `${leaks.length} live allocation(s) not freed` });
-        })
+            const items = leaks.map(l => ({
+                label: `$(warning) ${l.file}:${l.line}`,
+                description: formatBytes(l.size),
+                detail: `ptr: 0x${l.ptr.toString(16)}`,
+            }));
+            vscode.window.showQuickPick(items, {
+                title: `${leaks.length} unfreed allocation(s)`,
+                matchOnDescription: true,
+            });
+        }),
+
+        // Auto-start when a debug session launches
+        vscode.debug.onDidStartDebugSession(() => {
+            if (!tracking) {
+                startPolling(interval);
+            }
+        }),
+
+        // Auto-stop when the debug session ends
+        vscode.debug.onDidTerminateDebugSession(() => {
+            stopPolling();
+        }),
+
+        { dispose: () => { stopPolling(); statusBar.dispose(); } },
     );
 }
 
-export function deactivate() {
+export function deactivate(): void {
     stopPolling();
 }
 
-function startPolling(intervalMs: number) {
+function startPolling(intervalMs: number): void {
     stopPolling();
-    poller = setInterval(async () => {
-        await client.refresh();
-        codelens.refresh();
-        heatmap.refresh();
-    }, intervalMs);
+    tracking = true;
+    poller = setInterval(() => client.refresh(), intervalMs);
 }
 
-function stopPolling() {
+function stopPolling(): void {
+    tracking = false;
     if (poller) {
         clearInterval(poller);
         poller = undefined;
     }
-}
-
-function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }

@@ -14,18 +14,11 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {
-        "command": "ferroalloc.start",
-        "title": "Ferroalloc: Start Memory Tracking"
-      },
-      {
-        "command": "ferroalloc.stop",
-        "title": "Ferroalloc: Stop Memory Tracking"
-      },
-      {
-        "command": "ferroalloc.showLeaks",
-        "title": "Ferroalloc: Show Live Leaks"
-      }
+      { "command": "ferroalloc.start",     "title": "Ferroalloc: Start Memory Tracking" },
+      { "command": "ferroalloc.stop",      "title": "Ferroalloc: Stop Memory Tracking" },
+      { "command": "ferroalloc.toggle",    "title": "Ferroalloc: Toggle Memory Tracking" },
+      { "command": "ferroalloc.reset",     "title": "Ferroalloc: Reset Collected Data" },
+      { "command": "ferroalloc.showLeaks", "title": "Ferroalloc: Show Live Leaks" }
     ],
     "configuration": {
       "title": "Ferroalloc",
