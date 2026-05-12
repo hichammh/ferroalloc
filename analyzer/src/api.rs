@@ -1,8 +1,8 @@
-use crate::aggregator::Aggregator;
+use crate::aggregator::{Aggregator, EVENTS_RECEIVED, EVENTS_RESOLVED};
 use crate::diff;
 use crate::leak_report;
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::Ordering, Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
 /// Blocking HTTP API server — run this on a dedicated thread (not inside tokio).
@@ -66,7 +66,14 @@ pub fn serve(port: u16, aggregator: Arc<Aggregator>) {
                 *baseline.lock().unwrap() = None;
                 (200, r#"{"status":"reset"}"#.to_string())
             }
-            (Method::Get, "/health") => (200, r#"{"status":"ok"}"#.to_string()),
+            (Method::Get, "/health") => {
+                let body = format!(
+                    r#"{{"status":"ok","events_received":{},"events_resolved":{}}}"#,
+                    EVENTS_RECEIVED.load(Ordering::Relaxed),
+                    EVENTS_RESOLVED.load(Ordering::Relaxed),
+                );
+                (200, body)
+            }
             _ => (404, r#"{"error":"not found"}"#.to_string()),
         };
 

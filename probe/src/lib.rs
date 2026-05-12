@@ -1,34 +1,37 @@
-use backtrace::Backtrace;
 use crossbeam_queue::SegQueue;
 use serde::Serialize;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // Thread-local guard preventing re-entrant allocations triggered by the probe itself.
 // Backtrace collection internally allocates, so without this we'd recurse infinitely.
-// A Cell<bool> is sufficient — no cross-thread synchronisation needed by design.
 thread_local! {
     static IN_PROBE: Cell<bool> = const { Cell::new(false) };
 }
 
+// Gate: recording is disabled until start_flush_thread() connects to the analyzer.
+static PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 // Sampling: record only 1 out of every N allocations.
-// N=1 means record all (default). Set via `set_sample_rate()`.
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(1);
 static ALLOC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Set the sampling rate. Only 1 in every `n` allocations will be recorded.
-/// Use `n = 1` to record all (default). Higher values reduce overhead on hot paths.
 pub fn set_sample_rate(n: u32) {
     SAMPLE_RATE.store(n.max(1), Ordering::Relaxed);
 }
 
+/// An allocation event with the source location already resolved by the probe.
+/// Resolving at the probe side avoids ASLR/DWARF mismatch issues on macOS.
 #[derive(Serialize, Debug)]
 pub struct AllocEvent {
     pub kind: &'static str, // "alloc" | "dealloc"
     pub ptr: u64,
     pub size: usize,
-    pub frames: Vec<u64>, // raw instruction pointers, resolved by the analyzer
+    pub file: String,
+    pub line: u32,
+    pub function: String,
 }
 
 // Lock-free global queue drained by the background flush thread
@@ -85,6 +88,10 @@ unsafe impl GlobalAlloc for FerroAllocator {
 }
 
 fn record(ptr: u64, size: usize, kind: &'static str) {
+    if !PROBE_ACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+
     let already_in = IN_PROBE.with(|g| {
         if g.get() {
             true
@@ -97,7 +104,7 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
         return;
     }
 
-    // Apply sampling: skip this event if the counter is not a multiple of SAMPLE_RATE
+    // Apply sampling
     let rate = SAMPLE_RATE.load(Ordering::Relaxed);
     if rate > 1 {
         let count = ALLOC_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -107,15 +114,68 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
         }
     }
 
-    let bt = Backtrace::new_unresolved();
-    let frames: Vec<u64> = bt.frames().iter().map(|f| f.ip() as u64).take(32).collect();
+    // Resolve source location at the probe side using the runtime symbol table.
+    // This avoids ASLR/DWARF address mismatch issues on macOS.
+    let mut file = String::new();
+    let mut line: u32 = 0;
+    let mut function = String::new();
+    let mut found = false;
 
-    EVENT_QUEUE.push(AllocEvent {
-        kind,
-        ptr,
-        size,
-        frames,
-    });
+    unsafe {
+        backtrace::trace_unsynchronized(|frame| {
+            if found {
+                return false;
+            }
+            backtrace::resolve_frame_unsynchronized(frame, |symbol| {
+                let fname = symbol
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+
+                // Skip internal frames from the probe, backtrace, std, and core
+                let is_internal = fname.contains("ferroalloc_probe")
+                    || fname.contains("backtrace::")
+                    || fname.starts_with("std::")
+                    || fname.starts_with("core::")
+                    || fname.starts_with("alloc::")
+                    || fname.contains("__rust_")
+                    || fname.contains("_ZN");
+
+                let fpath = symbol
+                    .filename()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
+                // Skip frames from cargo registry, rustup toolchain, and system paths
+                let is_dep = fpath.contains(".cargo/registry")
+                    || fpath.contains(".rustup")
+                    || fpath.contains("/rustc/")
+                    || fpath.starts_with("/usr/")
+                    || fpath.starts_with("/Library/");
+
+                if is_internal || is_dep || fpath.is_empty() {
+                    return;
+                }
+
+                file = fpath;
+                line = symbol.lineno().unwrap_or(0);
+                function = fname;
+                found = true;
+            });
+            !found
+        });
+    }
+
+    if found && !file.is_empty() {
+        EVENT_QUEUE.push(AllocEvent {
+            kind,
+            ptr,
+            size,
+            file,
+            line,
+            function,
+        });
+    }
 
     IN_PROBE.with(|g| g.set(false));
 }
@@ -124,7 +184,6 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
 ///
 /// Must be called once at program startup, before allocations of interest occur.
 /// The analyzer must be listening on `127.0.0.1:<port>` (default: 7777).
-/// If the analyzer is not yet up, the thread retries the connection every 500 ms.
 pub fn start_flush_thread(port: u16) {
     std::thread::Builder::new()
         .name("ferroalloc-flush".into())
@@ -139,18 +198,21 @@ fn flush_loop(port: u16) {
     let addr = format!("127.0.0.1:{port}");
     loop {
         match TcpStream::connect(&addr) {
-            Ok(mut stream) => loop {
-                while let Some(event) = EVENT_QUEUE.pop() {
-                    if let Ok(mut json) = serde_json::to_vec(&event) {
-                        json.push(b'\n');
-                        if stream.write_all(&json).is_err() {
-                            break; // reconnect on next outer iteration
+            Ok(mut stream) => {
+                PROBE_ACTIVE.store(true, Ordering::Relaxed);
+                'send: loop {
+                    while let Some(event) = EVENT_QUEUE.pop() {
+                        if let Ok(mut json) = serde_json::to_vec(&event) {
+                            json.push(b'\n');
+                            if stream.write_all(&json).is_err() {
+                                PROBE_ACTIVE.store(false, Ordering::Relaxed);
+                                break 'send;
+                            }
                         }
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            },
-            // Analyzer not ready yet — keep retrying
+            }
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
         }
     }
@@ -162,8 +224,7 @@ mod tests {
     use std::alloc::Layout;
     use std::sync::Mutex;
 
-    // Tests share a global EVENT_QUEUE, so they must run serially to avoid
-    // one test consuming events that belong to another.
+    // Tests share a global EVENT_QUEUE, so they must run serially.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn drain_queue() -> Vec<AllocEvent> {
@@ -174,9 +235,18 @@ mod tests {
         events
     }
 
+    fn activate() {
+        PROBE_ACTIVE.store(true, Ordering::Relaxed);
+    }
+
+    fn deactivate() {
+        PROBE_ACTIVE.store(false, Ordering::Relaxed);
+    }
+
     #[test]
     fn alloc_pushes_event_to_queue() {
         let _guard = TEST_LOCK.lock().unwrap();
+        activate();
         drain_queue();
 
         let layout = Layout::from_size_align(64, 8).unwrap();
@@ -191,17 +261,19 @@ mod tests {
 
             FerroAllocator.dealloc(ptr, layout);
         }
+        deactivate();
     }
 
     #[test]
     fn dealloc_pushes_event_to_queue() {
         let _guard = TEST_LOCK.lock().unwrap();
+        activate();
         drain_queue();
 
         let layout = Layout::from_size_align(128, 8).unwrap();
         unsafe {
             let ptr = FerroAllocator.alloc(layout);
-            drain_queue(); // discard the alloc event
+            drain_queue();
 
             FerroAllocator.dealloc(ptr, layout);
 
@@ -210,11 +282,13 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == "dealloc" && e.ptr == ptr as u64));
         }
+        deactivate();
     }
 
     #[test]
     fn realloc_emits_dealloc_then_alloc() {
         let _guard = TEST_LOCK.lock().unwrap();
+        activate();
         drain_queue();
 
         let layout = Layout::from_size_align(64, 8).unwrap();
@@ -233,23 +307,25 @@ mod tests {
 
             FerroAllocator.dealloc(new_ptr, Layout::from_size_align(256, 8).unwrap());
         }
+        deactivate();
     }
 
     #[test]
     fn frames_are_captured() {
         let _guard = TEST_LOCK.lock().unwrap();
+        activate();
         drain_queue();
 
         let layout = Layout::from_size_align(32, 8).unwrap();
         unsafe {
             let ptr = FerroAllocator.alloc(layout);
             let events = drain_queue();
-            let event = events.iter().find(|e| e.kind == "alloc").unwrap();
-            assert!(
-                !event.frames.is_empty(),
-                "backtrace frames should be captured"
-            );
+            // With probe-side resolution, file should be non-empty for test code
+            let event = events.iter().find(|e| e.kind == "alloc");
+            assert!(event.is_some(), "alloc event should be captured");
+
             FerroAllocator.dealloc(ptr, layout);
         }
+        deactivate();
     }
 }

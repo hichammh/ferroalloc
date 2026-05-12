@@ -1,7 +1,11 @@
-use crate::dwarf::Resolver;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+// Debug counters exposed via /health
+pub static EVENTS_RECEIVED: AtomicU64 = AtomicU64::new(0);
+pub static EVENTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct LineStats {
@@ -10,14 +14,14 @@ pub struct LineStats {
     pub function: String,
     pub alloc_count: u64,
     pub total_bytes: u64,
-    /// Bytes currently live (allocated but not yet freed). Non-zero values indicate potential leaks.
+    /// Bytes currently live (not yet freed). Non-zero = potential leak.
     pub live_bytes: i64,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     by_line: HashMap<(String, u32), LineStats>,
-    /// Tracks live allocations keyed by pointer for dealloc matching.
+    /// Live allocations keyed by pointer for dealloc matching.
     live: HashMap<u64, (String, u32, usize)>,
 }
 
@@ -31,25 +35,21 @@ impl Aggregator {
         Self::default()
     }
 
-    pub fn process(&self, event: &serde_json::Value, resolver: &Resolver) {
+    /// Process a pre-resolved allocation event from the probe.
+    /// The event JSON contains (kind, ptr, size, file, line, function).
+    pub fn process(&self, event: &serde_json::Value) {
         let kind = event["kind"].as_str().unwrap_or("");
         let ptr = event["ptr"].as_u64().unwrap_or(0);
         let size = event["size"].as_u64().unwrap_or(0) as usize;
-        let frames: Vec<u64> = event["frames"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
-            .unwrap_or_default();
+        let file = event["file"].as_str().unwrap_or("").to_string();
+        let line = event["line"].as_u64().unwrap_or(0) as u32;
+        let function = event["function"].as_str().unwrap_or("").to_string();
 
-        // Walk the call stack; use the first frame that maps to user source code
-        let loc = frames.iter().find_map(|&ip| resolver.resolve(ip));
-        let (file, line, function) = match loc {
-            Some(l) => (
-                l.file.unwrap_or_default(),
-                l.line.unwrap_or(0),
-                l.function.unwrap_or_default(),
-            ),
-            None => return,
-        };
+        if file.is_empty() {
+            return;
+        }
+
+        EVENTS_RECEIVED.fetch_add(1, Ordering::Relaxed);
 
         let mut g = self.inner.lock().unwrap();
         let key = (file.clone(), line);
@@ -66,12 +66,14 @@ impl Aggregator {
                 entry.total_bytes += size as u64;
                 entry.live_bytes += size as i64;
                 g.live.insert(ptr, (file, line, size));
+                EVENTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
             }
             "dealloc" => {
                 if let Some((f, l, s)) = g.live.remove(&ptr) {
                     let entry = g.by_line.entry((f, l)).or_default();
                     entry.live_bytes = (entry.live_bytes - s as i64).max(0);
                 }
+                EVENTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -112,6 +114,8 @@ impl Aggregator {
         let mut g = self.inner.lock().unwrap();
         g.by_line.clear();
         g.live.clear();
+        EVENTS_RECEIVED.store(0, Ordering::Relaxed);
+        EVENTS_RESOLVED.store(0, Ordering::Relaxed);
     }
 }
 
@@ -127,71 +131,33 @@ pub struct LeakEntry {
 mod tests {
     use super::*;
 
-    fn make_event(kind: &str, ptr: u64, size: u64, frames: &[u64]) -> serde_json::Value {
+    fn alloc_event(ptr: u64, size: usize, file: &str, line: u32, function: &str) -> serde_json::Value {
         serde_json::json!({
-            "kind": kind,
+            "kind": "alloc",
             "ptr": ptr,
             "size": size,
-            "frames": frames,
+            "file": file,
+            "line": line,
+            "function": function,
         })
     }
 
-    struct FakeResolver {
-        file: String,
-        line: u32,
-        function: String,
-    }
-
-    impl FakeResolver {
-        fn new(file: &str, line: u32, function: &str) -> Self {
-            Self {
-                file: file.to_string(),
-                line,
-                function: function.to_string(),
-            }
-        }
-    }
-
-    // A minimal stand-in for Resolver that always returns the same location
-    fn process_with_loc(
-        agg: &Aggregator,
-        kind: &str,
-        ptr: u64,
-        size: usize,
-        file: &str,
-        line: u32,
-        function: &str,
-    ) {
-        let mut g = agg.inner.lock().unwrap();
-        let key = (file.to_string(), line);
-        match kind {
-            "alloc" => {
-                let entry = g.by_line.entry(key.clone()).or_insert_with(|| LineStats {
-                    file: file.to_string(),
-                    line,
-                    function: function.to_string(),
-                    ..Default::default()
-                });
-                entry.alloc_count += 1;
-                entry.total_bytes += size as u64;
-                entry.live_bytes += size as i64;
-                g.live.insert(ptr, (file.to_string(), line, size));
-            }
-            "dealloc" => {
-                if let Some((f, l, s)) = g.live.remove(&ptr) {
-                    let entry = g.by_line.entry((f, l)).or_default();
-                    entry.live_bytes = (entry.live_bytes - s as i64).max(0);
-                }
-            }
-            _ => {}
-        }
+    fn dealloc_event(ptr: u64, size: usize, file: &str, line: u32) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "dealloc",
+            "ptr": ptr,
+            "size": size,
+            "file": file,
+            "line": line,
+            "function": "",
+        })
     }
 
     #[test]
     fn alloc_increments_counts() {
         let agg = Aggregator::new();
-        process_with_loc(&agg, "alloc", 0x1000, 128, "main.rs", 10, "foo");
-        process_with_loc(&agg, "alloc", 0x2000, 64, "main.rs", 10, "foo");
+        agg.process(&alloc_event(0x1000, 128, "main.rs", 10, "foo"));
+        agg.process(&alloc_event(0x2000, 64, "main.rs", 10, "foo"));
 
         let snap = agg.snapshot();
         assert_eq!(snap.len(), 1);
@@ -203,20 +169,20 @@ mod tests {
     #[test]
     fn dealloc_reduces_live_bytes() {
         let agg = Aggregator::new();
-        process_with_loc(&agg, "alloc", 0x1000, 128, "main.rs", 10, "foo");
-        process_with_loc(&agg, "dealloc", 0x1000, 128, "main.rs", 10, "foo");
+        agg.process(&alloc_event(0x1000, 128, "main.rs", 10, "foo"));
+        agg.process(&dealloc_event(0x1000, 128, "main.rs", 10));
 
         let snap = agg.snapshot();
         assert_eq!(snap[0].live_bytes, 0);
-        assert_eq!(snap[0].total_bytes, 128); // historical total unchanged
+        assert_eq!(snap[0].total_bytes, 128);
     }
 
     #[test]
     fn live_leaks_returns_unfreed_allocations() {
         let agg = Aggregator::new();
-        process_with_loc(&agg, "alloc", 0x1000, 64, "main.rs", 5, "bar");
-        process_with_loc(&agg, "alloc", 0x2000, 32, "main.rs", 5, "bar");
-        process_with_loc(&agg, "dealloc", 0x1000, 64, "main.rs", 5, "bar");
+        agg.process(&alloc_event(0x1000, 64, "main.rs", 5, "bar"));
+        agg.process(&alloc_event(0x2000, 32, "main.rs", 5, "bar"));
+        agg.process(&dealloc_event(0x1000, 64, "main.rs", 5));
 
         let leaks = agg.live_leaks();
         assert_eq!(leaks.len(), 1);
@@ -227,7 +193,7 @@ mod tests {
     #[test]
     fn reset_clears_all_data() {
         let agg = Aggregator::new();
-        process_with_loc(&agg, "alloc", 0x1000, 64, "main.rs", 1, "baz");
+        agg.process(&alloc_event(0x1000, 64, "main.rs", 1, "baz"));
         agg.reset();
 
         assert!(agg.snapshot().is_empty());
@@ -237,9 +203,9 @@ mod tests {
     #[test]
     fn snapshot_sorted_by_total_bytes_desc() {
         let agg = Aggregator::new();
-        process_with_loc(&agg, "alloc", 0x1000, 64, "a.rs", 1, "small");
-        process_with_loc(&agg, "alloc", 0x2000, 1024, "b.rs", 2, "large");
-        process_with_loc(&agg, "alloc", 0x3000, 256, "c.rs", 3, "medium");
+        agg.process(&alloc_event(0x1000, 64, "a.rs", 1, "small"));
+        agg.process(&alloc_event(0x2000, 1024, "b.rs", 2, "large"));
+        agg.process(&alloc_event(0x3000, 256, "c.rs", 3, "medium"));
 
         let snap = agg.snapshot();
         assert_eq!(snap[0].total_bytes, 1024);
