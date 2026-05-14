@@ -1,0 +1,9 @@
+.vscode/**
+src/**
+.gitignore
+tsconfig.json
+**/*.map
+**/*.ts
+!out/**
+node_modules/**
+images/demo-raw/**
