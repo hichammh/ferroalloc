@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2] — 2026-05-14
+
+### Changed
+- Replace static demo image with animated GIF in README
+
 ## [0.1.1] — 2026-05-14
 
 ### Fixed
