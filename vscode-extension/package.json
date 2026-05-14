@@ -5,8 +5,18 @@
   "version": "0.1.0",
   "publisher": "hichammh",
   "engines": { "vscode": "^1.90.0" },
-  "categories": ["Debuggers", "Other"],
-  "keywords": ["rust", "memory", "heap", "allocator", "profiling", "codelens"],
+  "icon": "images/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hichammh/ferroalloc"
+  },
+  "bugs": {
+    "url": "https://github.com/hichammh/ferroalloc/issues"
+  },
+  "homepage": "https://github.com/hichammh/ferroalloc#readme",
+  "categories": ["Debuggers", "Visualization", "Other"],
+  "keywords": ["rust", "memory", "heap", "allocator", "profiling", "codelens", "leak", "heatmap"],
   "activationEvents": [
     "onLanguage:rust",
     "onDebugSession"

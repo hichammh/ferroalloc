@@ -1,0 +1,12 @@
+# Changelog
+
+## [0.1.0] — 2026-05-14
+
+### Added
+- **CodeLens**: displays live allocation count and total bytes per source line
+- **Heatmap**: green-to-red background highlighting by allocation pressure (5 intensity levels)
+- **Leak detection**: `ferroalloc: Show Live Leaks` lists lines with unreleased memory
+- **Snapshot diff**: `ferroalloc: Save Memory Baseline` + `ferroalloc: Show Diff Since Baseline`
+- **Status bar**: live byte counter with click-to-toggle tracking
+- Auto-start / auto-stop when a VS Code debug session begins and ends
+- Configurable analyzer port, refresh interval, and heatmap toggle
