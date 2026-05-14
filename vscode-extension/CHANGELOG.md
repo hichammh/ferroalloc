@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1] — 2026-05-14
+
+### Fixed
+- Crash in flush thread on macOS caused by reentrant backtrace calls during deallocation
+
 ## [0.1.0] — 2026-05-14
 
 ### Added
