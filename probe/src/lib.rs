@@ -163,16 +163,17 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
         });
     }
 
-    if found && !file.is_empty() {
-        EVENT_QUEUE.push(AllocEvent {
-            kind,
-            ptr,
-            size,
-            file,
-            line,
-            function,
-        });
-    }
+    // Always push the event so tests and environments without debug symbols still
+    // record alloc/dealloc operations. file/line/function may be empty when the
+    // backtrace resolver cannot find a user frame (e.g. CI without debug info).
+    EVENT_QUEUE.push(AllocEvent {
+        kind,
+        ptr,
+        size,
+        file,
+        line,
+        function,
+    });
 
     IN_PROBE.with(|g| g.set(false));
 }
