@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.4] — 2026-05-14
+
+### Fixed
+- Exclude demo GIF from VSIX package to reduce extension size (GIF served via GitHub URL)
+
 ## [0.1.3] — 2026-05-14
 
 ### Fixed
