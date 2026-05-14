@@ -193,6 +193,12 @@ fn flush_loop(port: u16) {
     use std::io::Write;
     use std::net::TcpStream;
 
+    // Permanently mark this thread so that none of its own allocations
+    // (e.g. serde_json serialization, TcpStream buffers) are ever recorded.
+    // Without this, dealloc() called from inside flush_loop re-enters
+    // backtrace::resolve_frame_unsynchronized and crashes on macOS.
+    IN_PROBE.with(|g| g.set(true));
+
     let addr = format!("127.0.0.1:{port}");
     loop {
         match TcpStream::connect(&addr) {
