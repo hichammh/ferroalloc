@@ -131,7 +131,13 @@ pub struct LeakEntry {
 mod tests {
     use super::*;
 
-    fn alloc_event(ptr: u64, size: usize, file: &str, line: u32, function: &str) -> serde_json::Value {
+    fn alloc_event(
+        ptr: u64,
+        size: usize,
+        file: &str,
+        line: u32,
+        function: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "kind": "alloc",
             "ptr": ptr,

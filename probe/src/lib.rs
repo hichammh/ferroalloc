@@ -127,10 +127,7 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
                 return false;
             }
             backtrace::resolve_frame_unsynchronized(frame, |symbol| {
-                let fname = symbol
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
+                let fname = symbol.name().map(|n| n.to_string()).unwrap_or_default();
 
                 // Skip internal frames from the probe, backtrace, std, and core
                 let is_internal = fname.contains("ferroalloc_probe")
