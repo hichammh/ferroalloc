@@ -7,3 +7,5 @@ tsconfig.json
 !out/**
 node_modules/**
 images/demo-raw/**
+images/demo.gif
+images/demo.png
