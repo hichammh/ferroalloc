@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.3] — 2026-05-14
+
+### Fixed
+- Demo GIF not displaying on VS Code Marketplace: switched to absolute GitHub URL
+
 ## [0.1.2] — 2026-05-14
 
 ### Changed

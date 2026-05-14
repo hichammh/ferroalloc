@@ -3,7 +3,7 @@
 Real-time heap memory visualization for Rust directly in VS Code.  
 See **which lines allocate the most**, detect leaks, and compare memory snapshots — without leaving your editor.
 
-![ferroalloc demo](images/demo.png)
+![ferroalloc demo](https://github.com/hichammh/ferroalloc/blob/main/vscode-extension/images/demo.gif?raw=true)
 
 ---
 
