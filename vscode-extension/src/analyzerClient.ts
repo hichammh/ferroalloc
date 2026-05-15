@@ -92,14 +92,20 @@ export class AnalyzerClient extends EventEmitter {
 
     /**
      * Returns stats for a specific file, keyed by line number.
-     * Matches by suffix so absolute vs relative paths both work.
+     * Prefers exact path match to avoid mixing stats from files with the same
+     * name in different directories (e.g. src/utils.rs vs tests/utils.rs).
+     * Falls back to suffix matching when paths are not directly comparable
+     * (e.g. absolute vs relative).
      */
     getStatsByFile(filePath: string): Map<number, LineStats> {
         const map = new Map<number, LineStats>();
         const normalized = filePath.replace(/\\/g, '/');
         for (const stat of this.cache) {
             const statFile = stat.file.replace(/\\/g, '/');
-            if (normalized.endsWith(statFile) || statFile.endsWith(normalized)) {
+            const exactMatch = normalized === statFile;
+            const suffixMatch = !exactMatch &&
+                (normalized.endsWith('/' + statFile) || statFile.endsWith('/' + normalized));
+            if (exactMatch || suffixMatch) {
                 map.set(stat.line, stat);
             }
         }
