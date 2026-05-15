@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.5] — 2026-05-15
+
+### Fixed
+- File path matching now prefers exact match before suffix to avoid mixing stats from files with identical names in different directories
+
 ## [0.1.4] — 2026-05-14
 
 ### Fixed
