@@ -1,113 +1,101 @@
-# Ferroalloc
+# ferroalloc
 
-> Real-time Rust heap memory visualization directly in VS Code — no code changes required.
+> Real-time Rust heap memory visualization directly in VS Code.
 
-![CI](https://github.com/hichammh/ferroalloc/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/hichammh/ferroalloc/actions/workflows/ci.yml/badge.svg)](https://github.com/hichammh/ferroalloc/actions/workflows/ci.yml)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/hichammh.ferroalloc)](https://marketplace.visualstudio.com/items?itemName=hichammh.ferroalloc)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/hichammh.ferroalloc)](https://marketplace.visualstudio.com/items?itemName=hichammh.ferroalloc)
+[![ferroalloc-probe on crates.io](https://img.shields.io/crates/v/ferroalloc-probe)](https://crates.io/crates/ferroalloc-probe)
+
+![ferroalloc demo](https://github.com/hichammh/ferroalloc/blob/main/vscode-extension/images/demo.gif?raw=true)
 
 ## What it does
 
-Ferroalloc instruments your Rust program's allocator at compile time and displays live memory stats
-inside the editor as you debug:
+Ferroalloc shows live heap memory stats inside VS Code as your Rust program runs:
 
-- **CodeLens** — allocation count, total bytes, and live bytes above each line that allocates
+- **CodeLens** — allocation count and total bytes above each line that allocates
 - **Heatmap** — lines colored green → red by allocation volume
-- **Leak detection** — lines with unfreed allocations are highlighted with a warning glyph
+- **Leak detection** — lines with unfreed allocations flagged with ⚠
+- **Snapshot diff** — compare memory state before and after a workload
 
-No source modifications needed. The probe is injected transparently via `RUSTFLAGS`.
+## Quick Start
+
+### 1 — Install the VS Code extension
+
+Search **"ferroalloc"** in the VS Code Extensions panel, or:
+
+```
+ext install hichammh.ferroalloc
+```
+
+### 2 — Install the analyzer
+
+```bash
+cargo install ferroalloc-analyzer
+```
+
+### 3 — Add the probe to your Rust project
+
+```toml
+# Cargo.toml
+[dependencies]
+ferroalloc-probe = "0.1"
+```
+
+```rust
+// src/main.rs
+use ferroalloc_probe::{FerroAllocator, start_flush_thread};
+
+#[global_allocator]
+static ALLOC: FerroAllocator = FerroAllocator;
+
+fn main() {
+    start_flush_thread(7777);
+    // ... rest of your program
+}
+```
+
+### 4 — Run
+
+```bash
+# Terminal 1 — start the analyzer
+ferroalloc-analyzer
+
+# Terminal 2 — run your program
+cargo run
+```
+
+Then in VS Code: `Cmd+Shift+P` → **Ferroalloc: Start Memory Tracking**
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Your Rust binary (debug build)                     │
-│  ┌──────────────────────────────────────────────┐   │
-│  │  ferroalloc-probe   (GlobalAlloc wrapper)    │   │
-│  │  Lock-free queue → flush thread → TCP :7777  │   │
-│  └──────────────────────────────────────────────┘   │
-└──────────────────────┬──────────────────────────────┘
-                       │ newline-delimited JSON events
-          ┌────────────▼────────────┐
-          │  ferroalloc-analyzer    │
-          │  DWARF resolver (gimli) │
-          │  Per-line aggregation   │
-          │  HTTP API  → TCP :7778  │
-          └────────────┬────────────┘
-                       │ JSON (poll every 1 s)
-          ┌────────────▼────────────┐
-          │  VS Code extension      │
-          │  CodeLens provider      │
-          │  Heatmap decorator      │
-          └─────────────────────────┘
+Your Rust app                Analyzer              VS Code Extension
+─────────────────            ────────────          ──────────────────
+FerroAllocator               ferroalloc-           ferroalloc
+  (GlobalAlloc)   ─TCP:7777─▶ analyzer   ─HTTP:7778─▶ extension
+  captures every             aggregates            CodeLens + heatmap
+  alloc/dealloc              by file:line          + leak panel
+  resolves symbol
+  at runtime
 ```
-
-## Getting started
-
-### 1. Build the analyzer
-
-```bash
-cargo build --release -p ferroalloc-analyzer
-```
-
-### 2. Build your Rust project with the probe
-
-```bash
-RUSTFLAGS="--extern ferroalloc_probe=target/debug/libferroalloc_probe.rlib" \
-  cargo build
-```
-
-> The probe registers itself as the global allocator. If your project already uses a custom
-> allocator (e.g. `jemalloc`), see the [Custom allocator guide](docs/custom-allocator.md).
-
-### 3. Start the analyzer
-
-```bash
-./target/release/ferroalloc-analyzer ./target/debug/your-binary
-```
-
-### 4. Run your binary
-
-The probe automatically connects to the analyzer on `127.0.0.1:7777`.
-
-### 5. Open VS Code
-
-Run the **Ferroalloc: Start Memory Tracking** command (`Ctrl+Shift+P`).
-CodeLens items and heatmap decorations will appear as your program runs.
-
-## VS Code commands
-
-| Command | Description |
-|---|---|
-| `Ferroalloc: Start Memory Tracking` | Begin polling the analyzer |
-| `Ferroalloc: Stop Memory Tracking` | Stop polling |
-| `Ferroalloc: Show Live Leaks` | List allocations not yet freed |
-
-## Configuration
-
-| Setting | Default | Description |
-|---|---|---|
-| `ferroalloc.analyzerPort` | `7778` | Port the analyzer API listens on |
-| `ferroalloc.refreshIntervalMs` | `1000` | Poll interval in milliseconds |
-| `ferroalloc.heatmapEnabled` | `true` | Enable/disable background heatmap |
 
 ## Project structure
 
 ```
 ferroalloc/
-├── probe/              # Rust crate — GlobalAlloc wrapper + IPC flush
-├── analyzer/           # Rust binary — DWARF resolver + HTTP API
-│   └── src/
-│       ├── main.rs
-│       ├── dwarf.rs    # addr2line / gimli integration
-│       ├── aggregator.rs
-│       └── api.rs
-├── vscode-extension/   # TypeScript VS Code extension
-│   └── src/
-│       ├── extension.ts
-│       ├── analyzerClient.ts
-│       ├── codelens.ts
-│       └── heatmap.ts
-└── .github/workflows/ci.yml
+├── probe/             # ferroalloc-probe crate (add to your project)
+├── analyzer/          # ferroalloc-analyzer binary (install on your machine)
+└── vscode-extension/  # VS Code extension (install from marketplace)
 ```
+
+## Configuration
+
+| Setting | Default | Description |
+|---|---|---|
+| `ferroalloc.analyzerPort` | `7778` | HTTP port of the analyzer API |
+| `ferroalloc.refreshIntervalMs` | `1000` | Poll interval in milliseconds |
+| `ferroalloc.heatmapEnabled` | `true` | Enable/disable background heatmap |
 
 ## License
 
