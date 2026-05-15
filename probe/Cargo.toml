@@ -3,6 +3,13 @@ name = "ferroalloc-probe"
 version = "0.1.0"
 edition = "2021"
 description = "Memory allocation probe for the ferroalloc VS Code extension"
+license = "MIT"
+repository = "https://github.com/hichammh/ferroalloc"
+homepage = "https://marketplace.visualstudio.com/items?itemName=hichammh.ferroalloc"
+documentation = "https://github.com/hichammh/ferroalloc"
+keywords = ["memory", "allocator", "profiling", "heap", "debugging"]
+categories = ["development-tools::profiling", "memory-management"]
+readme = "README.md"
 
 [lib]
 name = "ferroalloc_probe"
