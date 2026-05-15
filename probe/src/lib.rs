@@ -84,8 +84,18 @@ unsafe impl GlobalAlloc for FerroAllocator {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = System.realloc(ptr, layout, new_size);
         if !new_ptr.is_null() {
-            record(ptr as u64, layout.size(), "dealloc");
-            record(new_ptr as u64, new_size, "alloc");
+            if new_ptr == ptr {
+                // In-place resize: the block did not move. Record a dealloc for
+                // the old size and an alloc for the new size without changing the
+                // pointer — this correctly updates live_bytes without inflating
+                // alloc_count with a spurious extra allocation.
+                record(ptr as u64, layout.size(), "dealloc");
+                record(ptr as u64, new_size, "alloc");
+            } else {
+                // The allocator moved the block to a new address.
+                record(ptr as u64, layout.size(), "dealloc");
+                record(new_ptr as u64, new_size, "alloc");
+            }
         }
         new_ptr
     }
