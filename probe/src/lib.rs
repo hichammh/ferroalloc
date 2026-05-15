@@ -13,6 +13,10 @@ thread_local! {
 // Gate: recording is disabled until start_flush_thread() connects to the analyzer.
 static PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// Maximum number of events buffered in the queue. When full, new events are dropped
+// to prevent unbounded memory growth if the analyzer is disconnected.
+const MAX_QUEUE_LEN: usize = 10_000;
+
 // Sampling: record only 1 out of every N allocations.
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(1);
 static ALLOC_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -163,17 +167,18 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
         });
     }
 
-    // Always push the event so tests and environments without debug symbols still
-    // record alloc/dealloc operations. file/line/function may be empty when the
-    // backtrace resolver cannot find a user frame (e.g. CI without debug info).
-    EVENT_QUEUE.push(AllocEvent {
-        kind,
-        ptr,
-        size,
-        file,
-        line,
-        function,
-    });
+    // Drop events when the queue is full to prevent unbounded memory growth
+    // if the analyzer is disconnected (fixes OOM on high-allocation programs).
+    if EVENT_QUEUE.len() < MAX_QUEUE_LEN {
+        EVENT_QUEUE.push(AllocEvent {
+            kind,
+            ptr,
+            size,
+            file,
+            line,
+            function,
+        });
+    }
 
     IN_PROBE.with(|g| g.set(false));
 }
