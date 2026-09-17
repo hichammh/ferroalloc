@@ -40,6 +40,12 @@ cargo install ferroalloc-analyzer
 # Cargo.toml
 [dependencies]
 ferroalloc-probe = "0.1"
+
+# Required: without debug symbols the probe resolves no file or line, and the
+# extension has nothing to show. Cheap to enable, and it does not slow the build
+# output down.
+[profile.release]
+debug = true
 ```
 
 ```rust
@@ -88,6 +94,39 @@ ferroalloc/
 ├── analyzer/          # ferroalloc-analyzer binary (install on your machine)
 └── vscode-extension/  # VS Code extension (install from marketplace)
 ```
+
+## Troubleshooting
+
+**Nothing appears in the editor.** Check the analyzer's counters:
+
+```bash
+curl http://127.0.0.1:7778/health
+# {"status":"ok","events_received":8412,"events_resolved":8412,"events_dropped":0}
+```
+
+| What you see | What it means |
+|---|---|
+| `events_received: 0` | the probe never connected — is `start_flush_thread()` called, and is the analyzer running? |
+| `received > 0`, `resolved: 0` | no debug symbols: add `[profile.release] debug = true` to your program's `Cargo.toml` and rebuild |
+| `events_dropped > 0` | the program allocated faster than the analyzer could drain; counts are an over-estimate — use sampling below |
+
+The status bar reports both cases on its own.
+
+## Sampling
+
+On allocation-heavy programs, record only a fraction of the blocks:
+
+```rust
+ferroalloc_probe::set_sample_rate(100); // 1 block in 100
+```
+
+The decision is taken from the block address, so a sampled allocation always has
+its matching free recorded too — `live_bytes` stays meaningful and correct code is
+never reported as leaking.
+
+The flip side: an allocate-free loop that reuses one address is either fully
+recorded or fully skipped, so the volume reduction is weaker than the rate on that
+pattern. Correctness is unaffected.
 
 ## Configuration
 

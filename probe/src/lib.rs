@@ -13,17 +13,39 @@ thread_local! {
 // Gate: recording is disabled until start_flush_thread() connects to the analyzer.
 static PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// Maximum number of events buffered in the queue. When full, new events are dropped
-// to prevent unbounded memory growth if the analyzer is disconnected.
+// Maximum number of alloc events buffered in the queue. Once reached, new alloc
+// events are dropped to prevent unbounded memory growth if the analyzer is
+// disconnected.
 const MAX_QUEUE_LEN: usize = 10_000;
+
+// Deallocs are still accepted past MAX_QUEUE_LEN, up to this hard ceiling:
+// dropping the dealloc of an allocation we did record turns a freed block into a
+// phantom leak that never goes away. Above the ceiling they are dropped too, so
+// that the queue stays bounded.
+const HARD_QUEUE_LEN: usize = 20_000;
 
 // Sampling: record only 1 out of every N allocations.
 static SAMPLE_RATE: AtomicU32 = AtomicU32::new(1);
-static ALLOC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// Events discarded because the queue was full. Reported to the analyzer so the UI
+// can say the data is incomplete instead of presenting wrong numbers as fact.
+static EVENTS_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Set the sampling rate. Only 1 in every `n` allocations will be recorded.
+///
+/// The decision is taken from the block address, so the `dealloc` of a recorded
+/// `alloc` is always recorded as well. Sampling the two independently would leave
+/// `live_bytes` permanently high and report every correct program as leaking.
 pub fn set_sample_rate(n: u32) {
     SAMPLE_RATE.store(n.max(1), Ordering::Relaxed);
+}
+
+/// Number of events dropped because the event queue was full.
+///
+/// A non-zero value means the reported statistics are incomplete: the analyzer was
+/// not draining events as fast as the program produced them.
+pub fn events_dropped() -> u64 {
+    EVENTS_DROPPED.load(Ordering::Relaxed)
 }
 
 /// An allocation event with the source location already resolved by the probe.
@@ -101,6 +123,30 @@ unsafe impl GlobalAlloc for FerroAllocator {
     }
 }
 
+/// Whether a block is recorded under the current sampling rate.
+///
+/// Keyed on the block address — hashed, because alignment makes the low bits
+/// constant — so that the `alloc` and the `dealloc` of one block always take the
+/// same decision.
+fn is_sampled(ptr: u64, rate: u32) -> bool {
+    if rate <= 1 {
+        return true;
+    }
+    let hashed = ptr.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16;
+    hashed.is_multiple_of(rate as u64)
+}
+
+// Clears IN_PROBE even if symbol resolution unwinds. Without it, a panic inside
+// backtrace leaves the flag set and the thread silently stops recording for the
+// rest of its life.
+struct ProbeGuard;
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        IN_PROBE.with(|g| g.set(false));
+    }
+}
+
 fn record(ptr: u64, size: usize, kind: &'static str) {
     if !PROBE_ACTIVE.load(Ordering::Relaxed) {
         return;
@@ -117,15 +163,22 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
     if already_in {
         return;
     }
+    let _guard = ProbeGuard;
 
-    // Apply sampling
-    let rate = SAMPLE_RATE.load(Ordering::Relaxed);
-    if rate > 1 {
-        let count = ALLOC_COUNTER.fetch_add(1, Ordering::Relaxed);
-        if !count.is_multiple_of(rate as u64) {
-            IN_PROBE.with(|g| g.set(false));
-            return;
-        }
+    if !is_sampled(ptr, SAMPLE_RATE.load(Ordering::Relaxed)) {
+        return;
+    }
+
+    // Checked before resolving symbols: resolution is the expensive part, and an
+    // event we are about to drop is not worth paying for.
+    let limit = if kind == "dealloc" {
+        HARD_QUEUE_LEN
+    } else {
+        MAX_QUEUE_LEN
+    };
+    if EVENT_QUEUE.len() >= limit {
+        EVENTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
     }
 
     // Resolve source location at the probe side using the runtime symbol table.
@@ -177,20 +230,14 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
         });
     }
 
-    // Drop events when the queue is full to prevent unbounded memory growth
-    // if the analyzer is disconnected (fixes OOM on high-allocation programs).
-    if EVENT_QUEUE.len() < MAX_QUEUE_LEN {
-        EVENT_QUEUE.push(AllocEvent {
-            kind,
-            ptr,
-            size,
-            file,
-            line,
-            function,
-        });
-    }
-
-    IN_PROBE.with(|g| g.set(false));
+    EVENT_QUEUE.push(AllocEvent {
+        kind,
+        ptr,
+        size,
+        file,
+        line,
+        function,
+    });
 }
 
 /// Starts the background flush thread that streams allocation events to the analyzer.
@@ -215,6 +262,7 @@ fn flush_loop(port: u16) {
     IN_PROBE.with(|g| g.set(true));
 
     let addr = format!("127.0.0.1:{port}");
+    let mut reported_dropped = 0u64;
     loop {
         match TcpStream::connect(&addr) {
             Ok(mut stream) => {
@@ -229,6 +277,20 @@ fn flush_loop(port: u16) {
                             }
                         }
                     }
+
+                    // Tell the analyzer how many events were lost, so the UI can
+                    // flag the data as incomplete rather than silently showing
+                    // allocations without their matching frees.
+                    let dropped = EVENTS_DROPPED.load(Ordering::Relaxed);
+                    if dropped != reported_dropped {
+                        let line = format!("{{\"kind\":\"dropped\",\"count\":{dropped}}}\n");
+                        if stream.write_all(line.as_bytes()).is_err() {
+                            PROBE_ACTIVE.store(false, Ordering::Relaxed);
+                            break 'send;
+                        }
+                        reported_dropped = dropped;
+                    }
+
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
@@ -260,6 +322,8 @@ mod tests {
 
     fn deactivate() {
         PROBE_ACTIVE.store(false, Ordering::Relaxed);
+        SAMPLE_RATE.store(1, Ordering::Relaxed);
+        EVENTS_DROPPED.store(0, Ordering::Relaxed);
     }
 
     #[test]
@@ -326,6 +390,105 @@ mod tests {
 
             FerroAllocator.dealloc(new_ptr, Layout::from_size_align(256, 8).unwrap());
         }
+        deactivate();
+    }
+
+    #[test]
+    fn sampling_keeps_alloc_and_dealloc_of_the_same_block_together() {
+        // A block is either fully recorded or fully ignored. Sampling the two
+        // halves independently would leave live_bytes high forever and report a
+        // correct program as leaking.
+        for rate in [2u32, 10, 100, 997] {
+            for ptr in [0x1000u64, 0x7f_ffff_abcd, 0x2a2a_2a2a_2a2a] {
+                assert_eq!(
+                    is_sampled(ptr, rate),
+                    is_sampled(ptr, rate),
+                    "decision must be stable for ptr {ptr:#x} at rate {rate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sampling_rate_one_records_everything() {
+        for ptr in [0u64, 8, 0x1000, u64::MAX] {
+            assert!(is_sampled(ptr, 1));
+            assert!(is_sampled(ptr, 0));
+        }
+    }
+
+    #[test]
+    fn sampling_actually_thins_out_allocations() {
+        let kept = (0..10_000u64)
+            .map(|i| 0x1000 + i * 32)
+            .filter(|&ptr| is_sampled(ptr, 100))
+            .count();
+        // Roughly 1 %, with plenty of slack for hash imbalance.
+        assert!(
+            (20..500).contains(&kept),
+            "expected about 100 of 10000 blocks to be sampled, got {kept}"
+        );
+    }
+
+    #[test]
+    fn dealloc_is_still_recorded_when_the_alloc_queue_is_full() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        activate();
+        drain_queue();
+
+        // Fill the queue past the alloc limit with synthetic events.
+        for i in 0..MAX_QUEUE_LEN as u64 {
+            EVENT_QUEUE.push(AllocEvent {
+                kind: "alloc",
+                ptr: i,
+                size: 1,
+                file: "synthetic.rs".to_string(),
+                line: 1,
+                function: "fill".to_string(),
+            });
+        }
+
+        // Measured as a delta: the test's own allocations go through record()
+        // too, so the absolute counters are not ours alone.
+        let before = EVENT_QUEUE.len();
+        let dropped_before = events_dropped();
+        record(0xdead_beef, 64, "alloc");
+        assert_eq!(EVENT_QUEUE.len(), before, "alloc must be dropped when full");
+        assert_eq!(events_dropped(), dropped_before + 1);
+
+        record(0xdead_beef, 64, "dealloc");
+        assert!(
+            EVENT_QUEUE.len() > before,
+            "dealloc must still be recorded above MAX_QUEUE_LEN, otherwise the \
+             freed block shows up as a permanent leak"
+        );
+
+        drain_queue();
+        deactivate();
+    }
+
+    #[test]
+    fn everything_is_dropped_above_the_hard_ceiling() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        activate();
+        drain_queue();
+
+        for i in 0..HARD_QUEUE_LEN as u64 {
+            EVENT_QUEUE.push(AllocEvent {
+                kind: "dealloc",
+                ptr: i,
+                size: 1,
+                file: "synthetic.rs".to_string(),
+                line: 1,
+                function: "fill".to_string(),
+            });
+        }
+
+        let before = EVENT_QUEUE.len();
+        record(0xdead_beef, 64, "dealloc");
+        assert_eq!(EVENT_QUEUE.len(), before, "queue must stay bounded");
+
+        drain_queue();
         deactivate();
     }
 

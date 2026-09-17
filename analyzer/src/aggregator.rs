@@ -3,9 +3,22 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-// Debug counters exposed via /health
-pub static EVENTS_RECEIVED: AtomicU64 = AtomicU64::new(0);
-pub static EVENTS_RESOLVED: AtomicU64 = AtomicU64::new(0);
+/// Debug counters exposed via `/health`.
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct Counters {
+    pub events_received: u64,
+    pub events_resolved: u64,
+    pub events_dropped: u64,
+}
+
+// Fields of the aggregator rather than globals: two aggregators (or two tests
+// running in parallel) must not share one set of counters.
+#[derive(Debug, Default)]
+struct AtomicCounters {
+    received: AtomicU64,
+    resolved: AtomicU64,
+    dropped: AtomicU64,
+}
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct LineStats {
@@ -28,6 +41,7 @@ struct Inner {
 #[derive(Default)]
 pub struct Aggregator {
     inner: Mutex<Inner>,
+    counters: AtomicCounters,
 }
 
 impl Aggregator {
@@ -39,17 +53,30 @@ impl Aggregator {
     /// The event JSON contains (kind, ptr, size, file, line, function).
     pub fn process(&self, event: &serde_json::Value) {
         let kind = event["kind"].as_str().unwrap_or("");
+
+        // Control event, not an allocation: the probe reporting its losses.
+        if kind == "dropped" {
+            self.counters
+                .dropped
+                .store(event["count"].as_u64().unwrap_or(0), Ordering::Relaxed);
+            return;
+        }
+
         let ptr = event["ptr"].as_u64().unwrap_or(0);
         let size = event["size"].as_u64().unwrap_or(0) as usize;
         let file = event["file"].as_str().unwrap_or("").to_string();
         let line = event["line"].as_u64().unwrap_or(0) as u32;
         let function = event["function"].as_str().unwrap_or("").to_string();
 
+        // Counted before the unattributable ones are discarded below. Counting
+        // after made received == resolved unconditionally, which left /health
+        // blind to the most common failure: a build without debug symbols, where
+        // events do arrive but carry no file.
+        self.counters.received.fetch_add(1, Ordering::Relaxed);
+
         if file.is_empty() {
             return;
         }
-
-        EVENTS_RECEIVED.fetch_add(1, Ordering::Relaxed);
 
         let mut g = self.inner.lock().unwrap();
         let key = (file.clone(), line);
@@ -66,14 +93,22 @@ impl Aggregator {
                 entry.total_bytes += size as u64;
                 entry.live_bytes += size as i64;
                 g.live.insert(ptr, (file, line, size));
-                EVENTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
+                self.counters.resolved.fetch_add(1, Ordering::Relaxed);
             }
             "dealloc" => {
                 if let Some((f, l, s)) = g.live.remove(&ptr) {
-                    let entry = g.by_line.entry((f, l)).or_default();
+                    let entry = g
+                        .by_line
+                        .entry((f.clone(), l))
+                        .or_insert_with(|| LineStats {
+                            file: f,
+                            line: l,
+                            function: function.clone(),
+                            ..Default::default()
+                        });
                     entry.live_bytes = (entry.live_bytes - s as i64).max(0);
                 }
-                EVENTS_RESOLVED.fetch_add(1, Ordering::Relaxed);
+                self.counters.resolved.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -109,13 +144,23 @@ impl Aggregator {
             .collect()
     }
 
+    /// Snapshot of the diagnostic counters served by `/health`.
+    pub fn counters(&self) -> Counters {
+        Counters {
+            events_received: self.counters.received.load(Ordering::Relaxed),
+            events_resolved: self.counters.resolved.load(Ordering::Relaxed),
+            events_dropped: self.counters.dropped.load(Ordering::Relaxed),
+        }
+    }
+
     /// Clears all accumulated data (useful between debug sessions).
     pub fn reset(&self) {
         let mut g = self.inner.lock().unwrap();
         g.by_line.clear();
         g.live.clear();
-        EVENTS_RECEIVED.store(0, Ordering::Relaxed);
-        EVENTS_RESOLVED.store(0, Ordering::Relaxed);
+        self.counters.received.store(0, Ordering::Relaxed);
+        self.counters.resolved.store(0, Ordering::Relaxed);
+        self.counters.dropped.store(0, Ordering::Relaxed);
     }
 }
 
@@ -204,6 +249,51 @@ mod tests {
 
         assert!(agg.snapshot().is_empty());
         assert!(agg.live_leaks().is_empty());
+    }
+
+    #[test]
+    fn unresolved_events_are_counted_as_received_but_not_resolved() {
+        // The gap between the two counters is what tells the user their build has
+        // no debug symbols, so an event with no file must still be counted.
+        let agg = Aggregator::new();
+
+        agg.process(&alloc_event(0x1000, 64, "", 0, ""));
+
+        assert_eq!(agg.counters().events_received, 1);
+        assert_eq!(agg.counters().events_resolved, 0);
+        assert!(agg.snapshot().is_empty());
+    }
+
+    #[test]
+    fn dropped_control_event_is_not_an_allocation() {
+        let agg = Aggregator::new();
+
+        agg.process(&serde_json::json!({ "kind": "dropped", "count": 4_096 }));
+
+        assert_eq!(agg.counters().events_dropped, 4_096);
+        assert_eq!(agg.counters().events_received, 0);
+        assert!(agg.snapshot().is_empty());
+    }
+
+    #[test]
+    fn dealloc_after_reset_does_not_create_a_phantom_line() {
+        // A reset between the alloc and its dealloc used to insert a defaulted
+        // LineStats — empty file, line 0 — straight into /snapshot.
+        let agg = Aggregator::new();
+        agg.process(&alloc_event(0x1000, 128, "main.rs", 10, "foo"));
+        agg.process(&dealloc_event(0x1000, 128, "main.rs", 10));
+
+        let snap = agg.snapshot();
+        for entry in &snap {
+            assert!(
+                !entry.file.is_empty(),
+                "snapshot entry with no file: {entry:?}"
+            );
+            assert_ne!(entry.line, 0, "snapshot entry with line 0: {entry:?}");
+        }
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].file, "main.rs");
+        assert_eq!(snap[0].line, 10);
     }
 
     #[test]
