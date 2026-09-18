@@ -40,6 +40,13 @@ export interface DiffEntry {
     delta_live_bytes: number;
 }
 
+export interface Health {
+    status: string;
+    events_received: number;
+    events_resolved: number;
+    events_dropped: number;
+}
+
 export interface SnapshotDiff {
     increased: DiffEntry[];
     decreased: DiffEntry[];
@@ -51,12 +58,14 @@ export interface SnapshotDiff {
  * HTTP client for the ferroalloc-analyzer API.
  * Emits 'update' whenever the snapshot is refreshed successfully.
  * Emits 'connected' / 'disconnected' on state changes.
+ * Emits 'health' with the analyzer's diagnostic counters on every refresh.
  */
 export class AnalyzerClient extends EventEmitter {
     private baseUrl: string;
     private port: number;
     private cache: LineStats[] = [];
     private _connected = false;
+    private _health: Health | undefined;
 
     constructor(port: number) {
         super();
@@ -68,6 +77,11 @@ export class AnalyzerClient extends EventEmitter {
         return this._connected;
     }
 
+    /** Last diagnostic counters seen, or undefined if never fetched. */
+    get health(): Health | undefined {
+        return this._health;
+    }
+
     /** Fetch latest stats from the analyzer and update the cache. */
     async refresh(): Promise<void> {
         try {
@@ -76,10 +90,21 @@ export class AnalyzerClient extends EventEmitter {
                 this._connected = true;
                 this.emit('connected');
             }
+
+            // Health is polled alongside the snapshot: an analyzer that receives
+            // events without resolving any means the program was built without
+            // debug symbols, and an empty view would otherwise say nothing at all.
+            // Advisory only — a failure here must not mark us disconnected.
+            try {
+                this._health = await this.fetchHealth();
+                this.emit('health', this._health);
+            } catch { /* older analyzer, or a transient failure */ }
+
             this.emit('update', this.cache);
         } catch {
             if (this._connected) {
                 this._connected = false;
+                this._health = undefined;
                 this.emit('disconnected');
             }
         }
@@ -134,6 +159,10 @@ export class AnalyzerClient extends EventEmitter {
         await this.post('/reset');
         this.cache = [];
         this.emit('update', this.cache);
+    }
+
+    async fetchHealth(): Promise<Health> {
+        return this.get<Health>('/health');
     }
 
     async isHealthy(): Promise<boolean> {

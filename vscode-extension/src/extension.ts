@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AnalyzerClient } from './analyzerClient';
-import { MemoryCodeLensProvider, formatBytes } from './codelens';
+import { MemoryCodeLensProvider } from './codelens';
+import { formatBytes } from './format';
 import { HeatmapDecorator } from './heatmap';
 import { StatusBar } from './statusBar';
 
