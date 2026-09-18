@@ -43,7 +43,7 @@ ferroalloc-probe = "0.1"
 
 # Required: without debug symbols the probe resolves no file or line, and the
 # extension has nothing to show. Cheap to enable, and it does not slow the build
-# output down.
+# output down
 [profile.release]
 debug = true
 ```
