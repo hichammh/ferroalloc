@@ -91,8 +91,11 @@ unsafe impl GlobalAlloc for FerroAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
+        // Recorded while we still own the block. Once it is back with the system,
+        // another thread can be handed the same address and publish its alloc
+        // first, and the analyzer would then match our dealloc to that new block.
         record(ptr as u64, layout.size(), "dealloc");
+        System.dealloc(ptr, layout);
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
@@ -104,20 +107,17 @@ unsafe impl GlobalAlloc for FerroAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // A realloc is a dealloc of the old block followed by an alloc of the new
+        // one, whether the block moved or not. The dealloc is recorded before the
+        // call for the same reason as in dealloc(): if the block moves, the old
+        // address is released inside System.realloc and can be reused at once.
+        record(ptr as u64, layout.size(), "dealloc");
         let new_ptr = System.realloc(ptr, layout, new_size);
-        if !new_ptr.is_null() {
-            if new_ptr == ptr {
-                // In-place resize: the block did not move. Record a dealloc for
-                // the old size and an alloc for the new size without changing the
-                // pointer — this correctly updates live_bytes without inflating
-                // alloc_count with a spurious extra allocation.
-                record(ptr as u64, layout.size(), "dealloc");
-                record(ptr as u64, new_size, "alloc");
-            } else {
-                // The allocator moved the block to a new address.
-                record(ptr as u64, layout.size(), "dealloc");
-                record(new_ptr as u64, new_size, "alloc");
-            }
+        if new_ptr.is_null() {
+            // The old block is still ours: undo the dealloc recorded above.
+            record(ptr as u64, layout.size(), "alloc");
+        } else {
+            record(new_ptr as u64, new_size, "alloc");
         }
         new_ptr
     }
@@ -144,6 +144,30 @@ struct ProbeGuard;
 impl Drop for ProbeGuard {
     fn drop(&mut self) {
         IN_PROBE.with(|g| g.set(false));
+    }
+}
+
+static RESOLVE_LOCK: AtomicBool = AtomicBool::new(false);
+
+// Held while walking and resolving the stack; released on drop, including when
+// symbol resolution unwinds.
+struct ResolveLock;
+
+impl ResolveLock {
+    fn acquire() -> Self {
+        while RESOLVE_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        ResolveLock
+    }
+}
+
+impl Drop for ResolveLock {
+    fn drop(&mut self) {
+        RESOLVE_LOCK.store(false, Ordering::Release);
     }
 }
 
@@ -188,6 +212,12 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
     let mut function = String::new();
     let mut found = false;
 
+    // The *_unsynchronized backtrace functions share one global symbol cache and
+    // require the caller to serialize them: two threads resolving at once
+    // corrupt it and crash the program. A spin lock rather than a Mutex because
+    // it never allocates, which matters inside an allocator.
+    let _resolve_guard = ResolveLock::acquire();
+
     unsafe {
         backtrace::trace_unsynchronized(|frame| {
             if found {
@@ -229,6 +259,8 @@ fn record(ptr: u64, size: usize, kind: &'static str) {
             !found
         });
     }
+    // Released before pushing: the queue is lock-free and needs no protection.
+    drop(_resolve_guard);
 
     EVENT_QUEUE.push(AllocEvent {
         kind,
@@ -489,6 +521,109 @@ mod tests {
         assert_eq!(EVENT_QUEUE.len(), before, "queue must stay bounded");
 
         drain_queue();
+        deactivate();
+    }
+
+    // Collects events on a separate thread while the workers run, so that the
+    // queue never fills up and no event is dropped.
+    fn spawn_drainer(stop: std::sync::Arc<AtomicBool>) -> std::thread::JoinHandle<Vec<AllocEvent>> {
+        std::thread::spawn(move || {
+            // Like the flush thread: the drainer's own allocations are not ours.
+            IN_PROBE.with(|g| g.set(true));
+            let mut events = Vec::new();
+            loop {
+                let stopping = stop.load(Ordering::Acquire);
+                while let Some(e) = EVENT_QUEUE.pop() {
+                    events.push(e);
+                }
+                if stopping {
+                    return events;
+                }
+                std::thread::yield_now();
+            }
+        })
+    }
+
+    // Allocates, grows and frees blocks from several threads at once. The large
+    // sizes make the system allocator hand a freed address straight to another
+    // thread, which is what exposes ordering bugs.
+    fn run_concurrent_workload(threads: usize, iterations: usize) {
+        let workers: Vec<_> = (0..threads)
+            .map(|t| {
+                std::thread::spawn(move || unsafe {
+                    for i in 0..iterations {
+                        let size = [24, 4096, 128 * 1024, 512 * 1024][(i + t) % 4];
+                        let layout = Layout::from_size_align(size, 8).unwrap();
+                        let ptr = FerroAllocator.alloc(layout);
+                        let grown = FerroAllocator.realloc(ptr, layout, size * 2);
+                        FerroAllocator
+                            .dealloc(grown, Layout::from_size_align(size * 2, 8).unwrap());
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_allocations_do_not_crash() {
+        // Symbol resolution goes through backtrace's *_unsynchronized functions,
+        // which share a global cache. Without a lock around them, a few threads
+        // allocating at once corrupt it and abort the process.
+        let _guard = TEST_LOCK.lock().unwrap();
+        activate();
+        drain_queue();
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let drainer = spawn_drainer(stop.clone());
+        run_concurrent_workload(8, 300);
+        stop.store(true, Ordering::Release);
+        let events = drainer.join().unwrap();
+
+        // Reaching this point is the test; the check only guards against a
+        // workload that silently recorded nothing.
+        assert!(events.iter().any(|e| e.kind == "alloc"));
+        deactivate();
+    }
+
+    #[test]
+    fn a_freed_address_is_never_reported_allocated_before_its_free() {
+        // Replays the event stream the way the analyzer does. If the dealloc of a
+        // block is recorded after the memory went back to the system, another
+        // thread can get the same address and publish its alloc first: the
+        // analyzer then sees two live blocks at one address and keeps a phantom
+        // leak forever.
+        let _guard = TEST_LOCK.lock().unwrap();
+        activate();
+        drain_queue();
+        let dropped_before = events_dropped();
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let drainer = spawn_drainer(stop.clone());
+        run_concurrent_workload(8, 300);
+        stop.store(true, Ordering::Release);
+        let events = drainer.join().unwrap();
+
+        assert_eq!(
+            events_dropped(),
+            dropped_before,
+            "events were dropped, the replay below would be meaningless"
+        );
+        let mut live = std::collections::HashSet::new();
+        for (i, e) in events.iter().enumerate() {
+            match e.kind {
+                "alloc" => assert!(
+                    live.insert(e.ptr),
+                    "event {i}: alloc of {:#x} while that address is still live",
+                    e.ptr
+                ),
+                _ => {
+                    live.remove(&e.ptr);
+                }
+            }
+        }
         deactivate();
     }
 
